@@ -18,20 +18,21 @@ def virbot_cmd():
     parser.add_argument('--sen', action='store_true', help="Run the sensitive mode of VirBot.")
     parser.add_argument('--taxa', default="TOP", help="The mode of VirBot's taxanomic module (TOP(default)/LCA)")
     parser.add_argument('--threads', default="8", help="The threads number run for HMMER and DIAMOND")
+    parser.add_argument('--ref-path', default=VirBot_path + "/ref", help="The path to VirBot reference data")
     args = parser.parse_args()
     return args
 
-def read_thresholding():
-    filename = VirBot_path + "/ref/VirBot_hmm_threshold.txt"
+def read_thresholding(ref_path):
+    filename = ref_path + "/VirBot_hmm_threshold.txt"
     threshold = {}
     with open(filename, 'r') as f:
         for line in f:
             t = line.strip().split()
             threshold[int(t[0])] = float(t[1])
     return threshold
-    
-def read_hmmtaxa():
-    filename = VirBot_path + "/ref/VirBot_hmm_taxa_full.txt"
+
+def read_hmmtaxa(ref_path):
+    filename = ref_path + "/VirBot_hmm_taxa_full.txt"
     hmm_taxa = {}
     with open(filename, 'r') as f:
         for line in f:
@@ -39,14 +40,14 @@ def read_hmmtaxa():
             hmm_taxa[int(t[0])] = t[1]
     return hmm_taxa
 
-def read_rv_acc():
-    filename = VirBot_path + "/ref/VirBot_RNAvirus_acc.txt"
+def read_rv_acc(ref_path):
+    filename = ref_path + "/VirBot_RNAvirus_acc.txt"
     db_rc_acc = set()
     with open(filename, 'r') as f:
         for line in f:
             db_rc_acc.add(line.strip())
     return db_rc_acc
-    
+
 def longest_substring(sa,sb):
     for i in range(min(len(sa),len(sb))):
         if sa[i]!=sb[i]:
@@ -76,7 +77,7 @@ class contig:
 #                    tmp_top_score = value.score
         if len(self.proteins):
             self.rnaviralness = t / len(self.proteins)
-            
+
     def taxa_assignment(self, taxa_mode = "TOP"):
         if taxa_mode == "TOP":
             tmp_top_score = 0
@@ -94,12 +95,14 @@ class contig:
                         self.taxa = longest_substring(self.taxa,value.potential_taxa)
 
 #####################################################################################
-class protein:
-    db_threshold = read_thresholding()
-    db_hmmtaxa = read_hmmtaxa()
-    db_rv_acc = read_rv_acc()
+class protein_ref_data:
+    def __init__(self, ref_path):
+        self.db_threshold = read_thresholding(ref_path)
+        self.db_hmmtaxa = read_hmmtaxa(ref_path)
+        self.db_rv_acc = read_rv_acc(ref_path)
 
-    def __init__(self,fullname):
+class protein:
+    def __init__(self, fullname, ref_data):
         self.fullname = fullname
         self.contig_name = self._set_contig_name(fullname)
         self.seq=''
@@ -109,6 +112,8 @@ class protein:
         self.score = 0
         self.rnavaralness = 0
         self.diamond = None
+
+        self.ref_data = ref_data
 
     def _set_contig_name(self, fullname):
         t = fullname.strip('>').split()[0]
@@ -136,19 +141,19 @@ class protein:
                 = score, e_value, hit_clustet_index
 
     def rnavaralness_for_search(self):
-        if self.best_hit and self.score >= protein.db_threshold[self.best_hit] and self.e_value< 1e-3:
+        if self.best_hit and self.score >= self.ref_data.db_threshold[self.best_hit] and self.e_value< 1e-3:
             self.rnavaralness = 1
             positive_cluster.append(self.best_hit)
-            self.potential_taxa = protein.db_hmmtaxa[self.best_hit]
+            self.potential_taxa = self.ref_data.db_hmmtaxa[self.best_hit]
             print(self.fullname.split('#')[0][1:-1],
-                  '\tcluster_%d_(%.1f)' % (self.best_hit, protein.db_threshold[self.best_hit]),
+                  '\tcluster_%d_(%.1f)' % (self.best_hit, self.ref_data.db_threshold[self.best_hit]),
                   '\t', self.score, '\t', self.e_value,
                   '\t', self.potential_taxa)
 
     def parse_match_diamond_blastx(self, result):
         t = result.split()
         hit_acc = t[1]
-        if hit_acc in protein.db_rv_acc:
+        if hit_acc in self.ref_data.db_rv_acc:
             self.rnavaralness, self.diamond_acc = \
                 1, hit_acc
             print(self.fullname.split('#')[0][1:-1], '\t', hit_acc,
@@ -156,7 +161,7 @@ class protein:
 
 #####################################################################################
 def predict(output_dir, temp_dir,
-            file_input, file_output,
+            file_input, file_output, ref_data,
             sen=False, taxa_mode = "TOP"):
     """
     :param file_input: input contigs
@@ -173,7 +178,7 @@ def predict(output_dir, temp_dir,
             for line in f:
                 if line.startswith('>'):
                     prot_name = line.strip('>').split()[0]
-                    proteins[prot_name]=protein(line)
+                    proteins[prot_name]=protein(line, ref_data)
         return proteins
 
     def parse_hmmsearch(filename,proteins):
@@ -333,7 +338,7 @@ def predict(output_dir, temp_dir,
 if __name__ == "__main__":
 
     args = virbot_cmd()
-    
+
     if args.taxa != "TOP" and args.taxa != "LCA":
         raise Exception("The taxonmic mode should be \"TOP\" or \"LCA\".")
 
@@ -356,26 +361,73 @@ if __name__ == "__main__":
 
     # run Prodigal
     print("Predicting the encoded proteins...")
-    subprocess.run(f"prodigal -i {args.input} -a {temp_dir}/protein.faa -p meta", shell=True, stdout=FNULL, stderr=subprocess.STDOUT)
+    subprocess.run(
+        [
+            "prodigal",
+            "-i",
+            args.input,
+            "-a",
+            f"{temp_dir}/protein.faa",
+            "-p",
+            "meta",
+        ],
+        stdout=FNULL,
+        stderr=subprocess.STDOUT,
+    )
     print("Proteins prediction finished.")
 
     # run HMMER
     print("Scanning the protein by hmmsearch...")
-    subprocess.run(f"hmmsearch --tblout {temp_dir}/VB_hmmer.out --noali -E 0.001 --cpu {args.threads} {VirBot_path}/ref/VirBot.hmm {temp_dir}/protein.faa", shell=True, stdout=FNULL)
+    subprocess.run(
+        [
+            "hmmsearch",
+            "--tblout",
+            f"{temp_dir}/VB_hmmer.out",
+            "--noali",
+            "-E",
+            "0.001",
+            "--cpu",
+            args.threads,
+            f"{args.ref_path}/VirBot.hmm",
+            f"{temp_dir}/protein.faa"
+        ],
+        stdout=FNULL,
+    )
     print("HMMER finshed.")
 
     # run DIAMOND (in sensitive mode)
     if args.sen:
         print("Scanning the protein by DIAMOND...")
-        subprocess.run(f"diamond blastp --db {VirBot_path}/ref/VirBot.dmnd --query {temp_dir}/protein.faa "
-                       f"--outfmt 6 --max-target-seqs 1 --threads {args.threads} "
-                       f"--evalue 1e-5 --out {temp_dir}/VB_diamond.out", shell=True, stdout=FNULL, stderr=subprocess.STDOUT)
+        subprocess.run(
+            [
+                "diamond",
+                "blastp",
+                "--db",
+                f"{args.ref_path}/VirBot.dmnd",
+                "--query",
+                f"{temp_dir}/protein.faa",
+                "--outfmt",
+                "6",
+                "--max-target-seqs",
+                "1",
+                "--threads",
+                args.threads,
+                "--evalue",
+                "1e-5",
+                "--out",
+                f"{temp_dir}/VB_diamond.out",
+            ],
+            stdout=FNULL,
+            stderr=subprocess.STDOUT,
+        )
         print("DIAMOND finshed.")
 
     # predict using VirBot
+    ref_data = protein_ref_data(args.ref_path)
     predict(output_dir=f"{output_dir}/",
             temp_dir=f"{temp_dir}/",
             file_input = args.input,
             file_output = "output.vb.fasta",
+            ref_data = ref_data,
             sen=args.sen, taxa_mode = args.taxa)
 
